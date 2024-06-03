@@ -33,12 +33,25 @@
 #include "lcd.h"
 #include "linux_devlcd.h"
 #include "shared/report.h"
+#include "adv_bignum.h"
 
 
 /** private data for the \c text driver */
 typedef struct linuxDevLcd_private_data {
 	int width;		/**< display width in characters */
 	int height;		/**< display height in characters */
+	int cellwidth, cellheight;      /**< size a one cell (pixels) */
+	CGram cc[NUM_CCs];      /**< the custom character cache */
+	CGmode ccmode;          /**< character mode of the current screen */
+
+	/**
+	 * lastline controls the use of the last line, if pixel addressable
+	 * (true, default) or underline effect (false). To avoid the
+	 * underline effect, last line is always zeroed for whatever
+	 * redefined character.
+	 */
+	char lastline;
+
 	char *framebuf;		/**< fram buffer */
 	FILE* fd;		/**< handle to the device */
 } PrivateData;
@@ -72,6 +85,11 @@ linuxDevLcd_init (Driver *drvthis)
 		return -1;
 
 	/* initialize private data */
+	p->cellheight = 8;	/* Do not change this !!! This is a 
+				 * controller property, not a display
+				 * property !!! */
+	p->cellwidth = 5;
+	p->ccmode = standard;
 
 	/* which device should be used */
 	strncpy(device, drvthis->config_get_string(drvthis->name, "Device", 0, DEFAULT_DEVICE),
@@ -110,11 +128,8 @@ linuxDevLcd_init (Driver *drvthis)
 	memset(p->framebuf, ' ', p->width * p->height);
 
 	/* open the device... */
-	if (!strcmp(device,"-")) {
-		p->fd = stdout;
-	} else {
-		p->fd = fopen(device, "w" );
-	}
+	p->fd = fopen(device, "w" );
+
 	if (p->fd == 0) {
 		report(RPT_ERR, "%s: open(%s) failed (%s)", drvthis->name, device, strerror(errno));
 		if (errno == EACCES)
@@ -124,6 +139,9 @@ linuxDevLcd_init (Driver *drvthis)
 	report(RPT_INFO, "%s: opened display on %s", drvthis->name, device);
 
 	fprintf(p->fd, "\e[LI"); // Reinitialise display
+	fprintf(p->fd, "\e[Lc"); // Cursor off
+	fprintf(p->fd, "\e[Lb"); // Blink off
+	fprintf(p->fd, "\e[LD"); // Display on
 
 	report(RPT_DEBUG, "%s: init() done", drvthis->name);
 
@@ -203,14 +221,12 @@ MODULE_EXPORT void
 linuxDevLcd_flush (Driver *drvthis)
 {
 	PrivateData *p = drvthis->private_data;
-	char out[LCD_MAX_WIDTH];
 	int i;
 
 	fprintf(p->fd, "\e[H"); // cursor home
 	for (i = 0; i < p->height; i++) {
-		memcpy(out, p->framebuf + (i * p->width), p->width);
-		out[p->width] = '\0';
-		fprintf(p->fd, "%s\n", out);
+		fwrite( p->framebuf + (i * p->width), p->width, 1, p->fd);
+		fputc ('\n', p->fd);
 	}
 
         fflush(p->fd);
@@ -264,21 +280,6 @@ linuxDevLcd_chr (Driver *drvthis, int x, int y, char c)
 
 
 /**
- * Change the display contrast.
- * linux /dev/lcd driver does not support this, so we ignore it.
- * \param drvthis  Pointer to driver structure.
- * \param promille New contrast value in promille.
- */
-MODULE_EXPORT void
-linuxDevLcd_set_contrast (Driver *drvthis, int promille)
-{
-	//PrivateData *p = drvthis->private_data;
-
-	debug(RPT_DEBUG, "Contrast: %d", promille);
-}
-
-
-/**
  * Turn the display backlight on or off.
  * linux /dev/lcd driver uses escape sequences to implement this
  * \param drvthis  Pointer to driver structure.
@@ -306,7 +307,228 @@ MODULE_EXPORT const char *
 linuxDevLcd_get_info (Driver *drvthis)
 {
 	//PrivateData *p = drvthis->private_data;
-        static char *info_string = "Text mode driver";
+        static char *info_string = "Linux devlcd driver";
 
 	return info_string;
 }
+
+
+/**
+ * Get total number of custom characters available.
+ * \param drvthis  Pointer to driver structure.
+ * \return  Number of custom characters (always NUM_CCs).
+ */
+MODULE_EXPORT int
+linuxDevLcd_get_free_chars(Driver *drvthis)
+{
+	return NUM_CCs;
+}
+
+
+/**
+ * Define a custom character and write it to the LCD.
+ * \param drvthis  Pointer to driver structure.
+ * \param n        Custom character to define [0 - (NUM_CCs-1)].
+ * \param dat      Array of 8 (=cellheight) bytes, each representing a pixel row
+ *                 starting from the top to bottom.
+ *                 The bits in each byte represent the pixels where the LSB
+ *                 (least significant bit) is the rightmost pixel in each pixel row.
+ */
+MODULE_EXPORT void
+linuxDevLcd_set_char(Driver *drvthis, int n, unsigned char *dat)
+{
+	PrivateData *p = (PrivateData *) drvthis->private_data;
+	unsigned char mask = (1 << p->cellwidth) - 1;
+	int row;
+
+	if ((n < 0) || (n >= NUM_CCs))
+		return;
+	if (!dat)
+		return;
+
+	fprintf(p->fd, "\e[LG%0d", n);
+	for (row = 0; row < p->cellheight; row++) {
+		fprintf(p->fd, "%02x", dat[row] & mask);
+	}
+	fprintf(p->fd, ";");
+
+	for (row = 0; row < p->cellheight; row++) {
+		int letter = 0;
+
+		if (p->lastline || (row < p->cellheight - 1))
+			letter = dat[row] & mask;
+
+		if (p->cc[n].cache[row] != letter)
+			p->cc[n].clean = 0;	/* only mark dirty if really different */
+		p->cc[n].cache[row] = letter;
+	}
+}
+
+
+/**
+ * Place an icon on the screen.
+ * \param drvthis  Pointer to driver structure.
+ * \param x        Horizontal character position (column).
+ * \param y        Vertical character position (row).
+ * \param icon     synbolic value representing the icon.
+ * \retval 0       Icon has been successfully defined/written.
+ * \retval <0      Server core shall define/write the icon.
+ */
+MODULE_EXPORT int
+linuxDevLcd_icon(Driver *drvthis, int x, int y, int icon)
+{
+	PrivateData *p = (PrivateData *) drvthis->private_data;
+
+	static unsigned char heart_open[] =
+		{ b__XXXXX,
+		  b__X_X_X,
+		  b_______,
+		  b_______,
+		  b_______,
+		  b__X___X,
+		  b__XX_XX,
+		  b__XXXXX };
+	static unsigned char heart_filled[] =
+		{ b__XXXXX,
+		  b__X_X_X,
+		  b___X_X_,
+		  b___XXX_,
+		  b___XXX_,
+		  b__X_X_X,
+		  b__XX_XX,
+		  b__XXXXX };
+	static unsigned char arrow_up[] =
+		{ b____X__,
+		  b___XXX_,
+		  b__X_X_X,
+		  b____X__,
+		  b____X__,
+		  b____X__,
+		  b____X__,
+		  b_______ };
+	static unsigned char arrow_down[] =
+		{ b____X__,
+		  b____X__,
+		  b____X__,
+		  b____X__,
+		  b__X_X_X,
+		  b___XXX_,
+		  b____X__,
+		  b_______ };
+	static unsigned char checkbox_off[] =
+		{ b_______,
+		  b_______,
+		  b__XXXXX,
+		  b__X___X,
+		  b__X___X,
+		  b__X___X,
+		  b__XXXXX,
+		  b_______ };
+	static unsigned char checkbox_on[] =
+		{ b____X__,
+		  b____X__,
+		  b__XXX_X,
+		  b__X_XX_,
+		  b__X_X_X,
+		  b__X___X,
+		  b__XXXXX,
+		  b_______ };
+	static unsigned char checkbox_gray[] =
+		{ b_______,
+		  b_______,
+		  b__XXXXX,
+		  b__X_X_X,
+		  b__XX_XX,
+		  b__X_X_X,
+		  b__XXXXX,
+		  b_______ };
+	static unsigned char block_filled[] =
+		{ b__XXXXX,
+		  b__XXXXX,
+		  b__XXXXX,
+		  b__XXXXX,
+		  b__XXXXX,
+		  b__XXXXX,
+		  b__XXXXX,
+		  b__XXXXX };
+
+	/* Icons from CGROM will always work */
+	switch (icon) {
+	    case ICON_ARROW_LEFT:
+		linuxDevLcd_chr(drvthis, x, y, 0x1B);
+		return 0;
+	    case ICON_ARROW_RIGHT:
+		linuxDevLcd_chr(drvthis, x, y, 0x1A);
+		return 0;
+	}
+
+	/* The full block works except if ccmode=bignum */
+	if (icon == ICON_BLOCK_FILLED) {
+		if (p->ccmode != bignum) {
+			linuxDevLcd_set_char(drvthis, 0, block_filled);
+			linuxDevLcd_chr(drvthis, x, y, 0);
+			return 0;
+		}
+		else {
+			return -1;
+		}
+	}
+
+	/* The heartbeat icons do not work in bignum and vbar mode */
+	if ((icon == ICON_HEART_FILLED) || (icon == ICON_HEART_OPEN)) {
+		if ((p->ccmode != bignum) && (p->ccmode != vbar)) {
+			switch (icon) {
+			    case ICON_HEART_FILLED:
+				linuxDevLcd_set_char(drvthis, 7, heart_filled);
+				linuxDevLcd_chr(drvthis, x, y, 7);
+				return 0;
+			    case ICON_HEART_OPEN:
+				linuxDevLcd_set_char(drvthis, 7, heart_open);
+				linuxDevLcd_chr(drvthis, x, y, 7);
+				return 0;
+			}
+		}
+		else {
+			return -1;
+		}
+	}
+
+	/* All other icons work only in the standard or icon ccmode */
+	if (p->ccmode != icons) {
+		if (p->ccmode != standard) {
+			/* Not supported (yet) */
+			report(RPT_WARNING, "%s: num: cannot combine two modes using user-defined characters",
+					drvthis->name);
+			return -1;
+		}
+		p->ccmode = icons;
+	}
+
+	switch (icon) {
+		case ICON_ARROW_UP:
+			linuxDevLcd_set_char(drvthis, 1, arrow_up);
+			linuxDevLcd_chr(drvthis, x, y, 1);
+			break;
+		case ICON_ARROW_DOWN:
+			linuxDevLcd_set_char(drvthis, 2, arrow_down);
+			linuxDevLcd_chr(drvthis, x, y, 2);
+			break;
+		case ICON_CHECKBOX_OFF:
+			linuxDevLcd_set_char(drvthis, 3, checkbox_off);
+			linuxDevLcd_chr(drvthis, x, y, 3);
+			break;
+		case ICON_CHECKBOX_ON:
+			linuxDevLcd_set_char(drvthis, 4, checkbox_on);
+			linuxDevLcd_chr(drvthis, x, y, 4);
+			break;
+		case ICON_CHECKBOX_GRAY:
+			linuxDevLcd_set_char(drvthis, 5, checkbox_gray);
+			linuxDevLcd_chr(drvthis, x, y, 5);
+			break;
+		default:
+			return -1;	/* Let the core do other icons */
+	}
+	return 0;
+}
+
+
