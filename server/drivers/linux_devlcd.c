@@ -30,7 +30,7 @@
 #include <errno.h>
 #include <fcntl.h>
 
-#include "lcd.h"
+#include "lcd_lib.h"
 #include "linux_devlcd.h"
 #include "shared/report.h"
 #include "adv_bignum.h"
@@ -322,6 +322,116 @@ MODULE_EXPORT int
 linuxDevLcd_get_free_chars(Driver *drvthis)
 {
 	return NUM_CCs;
+}
+
+
+/**
+ * Draw a vertical bar bottom-up.
+ * \param drvthis  Pointer to driver structure.
+ * \param x        Horizontal character position (column) of the starting point.
+ * \param y        Vertical character position (row) of the starting point.
+ * \param len      Number of characters that the bar is high at 100%
+ * \param promille Current height level of the bar in promille.
+ * \param options  Options (currently unused).
+ */
+MODULE_EXPORT void
+linuxDevLcd_vbar(Driver *drvthis, int x, int y, int len, int promille, int options)
+{
+	PrivateData *p = (PrivateData *) drvthis->private_data;
+
+	if (p->ccmode != vbar) {
+		unsigned char vBar[p->cellheight];
+		int i;
+
+		if (p->ccmode != standard) {
+			/* Not supported(yet) */
+			report(RPT_WARNING, "%s: vbar: cannot combine two modes using user-defined characters",
+				drvthis->name);
+			return;
+		}
+		p->ccmode = vbar;
+
+		memset(vBar, 0x00, sizeof(vBar));
+
+		for (i = 1; i < p->cellheight; i++) {
+			/* add pixel line per pixel line ... */
+			vBar[p->cellheight - i] = 0xFF;
+			linuxDevLcd_set_char(drvthis, i, vBar);
+		}
+	}
+
+	lib_vbar_static(drvthis, x, y, len, promille, options, p->cellheight, 0);
+}
+
+
+/**
+ * Draw a horizontal bar to the right.
+ * \param drvthis  Pointer to driver structure.
+ * \param x        Horizontal character position (column) of the starting point.
+ * \param y        Vertical character position (row) of the starting point.
+ * \param len      Number of characters that the bar is long at 100%
+ * \param promille Current length level of the bar in promille.
+ * \param options  Options (currently unused).
+ */
+MODULE_EXPORT void
+linuxDevLcd_hbar(Driver *drvthis, int x, int y, int len, int promille, int options)
+{
+	PrivateData *p = (PrivateData *) drvthis->private_data;
+
+	if (p->ccmode != hbar) {
+		unsigned char hBar[p->cellheight];
+		int i;
+
+		if (p->ccmode != standard) {
+			/* Not supported(yet) */
+			report(RPT_WARNING, "%s: hbar: cannot combine two modes using user-defined characters",
+			      drvthis->name);
+			return;
+		}
+
+		p->ccmode = hbar;
+
+		for (i = 1; i <= p->cellwidth; i++) {
+			/* fill pixel columns from left to right. */
+			memset(hBar, 0xFF & ~((1 << (p->cellwidth - i)) - 1), sizeof(hBar));
+			linuxDevLcd_set_char(drvthis, i, hBar);
+		}
+	}
+
+	lib_hbar_static(drvthis, x, y, len, promille, options, p->cellwidth, 0);
+}
+
+
+/**
+ * Write a big number to the screen.
+ * \param drvthis  Pointer to driver structure.
+ * \param x        Horizontal character position (column).
+ * \param num      Character to write (0 - 10 with 10 representing ':')
+ */
+MODULE_EXPORT void
+linuxDevLcd_num(Driver *drvthis, int x, int num)
+{
+	PrivateData *p = (PrivateData *) drvthis->private_data;
+	int do_init = 0;
+
+	if ((num < 0) || (num > 10))
+		return;
+
+	if (p->ccmode != bignum) {
+		if (p->ccmode != standard) {
+			/* Not supported (yet) */
+			report(RPT_WARNING, "%s: num: cannot combine two modes using user-defined characters",
+					drvthis->name);
+			return;
+		}
+
+		p->ccmode = bignum;
+
+		do_init = 1;
+	}
+
+	/* Lib_adv_bignum does everything needed to show the bignumbers. */
+	lib_adv_bignum(drvthis, x, num, 0, do_init);
 }
 
 
