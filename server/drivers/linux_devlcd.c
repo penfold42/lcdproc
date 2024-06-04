@@ -54,8 +54,8 @@ MODULE_EXPORT int
 linuxDevLcd_init (Driver *drvthis)
 {
 	PrivateData *p;
-	char buf[256];
-	char device[200];
+	const char *buf;
+	const char *device;
 
 	/* Allocate and store private data */
 	p = (PrivateData *) calloc(1, sizeof(PrivateData));
@@ -75,12 +75,7 @@ linuxDevLcd_init (Driver *drvthis)
 	p->backlight_state = -1;
 
 	/* which device should be used */
-	strncpy(device, drvthis->config_get_string(drvthis->name, "Device", 0, DEFAULT_DEVICE),
-		sizeof(device));
-	device[sizeof(device) - 1] = '\0';
-
-	report(RPT_INFO, "%s: using Device %s",
-	       drvthis->name, device);
+	device = drvthis->config_get_string(drvthis->name, "Device", 0, DEFAULT_DEVICE);
 
 	p->nextrefresh          = 0;
 	p->refreshdisplay       = drvthis->config_get_int(drvthis->name, "refreshdisplay", 0, 0);
@@ -96,8 +91,7 @@ linuxDevLcd_init (Driver *drvthis)
 	}
 	else {
 		/* Use our own size from config file */
-		strncpy(buf, drvthis->config_get_string(drvthis->name, "Size", 0, TEXTDRV_DEFAULT_SIZE), sizeof(buf));
-		buf[sizeof(buf)-1] = '\0';
+		buf = drvthis->config_get_string(drvthis->name, "Size", 0, TEXTDRV_DEFAULT_SIZE);
 		if ((sscanf(buf , "%dx%d", &p->width, &p->height) != 2)
 		    || (p->width <= 0) || (p->width > LCD_MAX_WIDTH)
 		    || (p->height <= 0) || (p->height > LCD_MAX_HEIGHT)) {
@@ -124,7 +118,6 @@ linuxDevLcd_init (Driver *drvthis)
 
 	/* open the device... */
 	p->fd = fopen(device, "w" );
-
 	if (p->fd == 0) {
 		report(RPT_ERR, "%s: open(%s) failed (%s)", drvthis->name, device, strerror(errno));
 		if (errno == EACCES)
