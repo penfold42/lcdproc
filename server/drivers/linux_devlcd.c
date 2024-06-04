@@ -201,6 +201,34 @@ linuxDevLcd_height (Driver *drvthis)
 
 
 /**
+ * Return the width of a character in pixels.
+ * \param drvthis  Pointer to driver structure.
+ * \return  Number of pixel columns a character cell is wide.
+ */
+MODULE_EXPORT int
+linuxDevLcd_cellwidth(Driver *drvthis)
+{
+	PrivateData *p = (PrivateData *) drvthis->private_data;
+
+	return p->cellwidth;
+}
+
+
+/**
+ * Return the height of a character in pixels.
+ * \param drvthis  Pointer to driver structure.
+ * \return  Number of pixel lines a character cell is high.
+ */
+MODULE_EXPORT int
+HD44780_cellheight(Driver *drvthis)
+{
+	PrivateData *p = (PrivateData *) drvthis->private_data;
+
+	return p->cellheight;
+}
+
+
+/**
  * Clear the screen.
  * \param drvthis  Pointer to driver structure.
  */
@@ -210,6 +238,7 @@ linuxDevLcd_clear (Driver *drvthis)
 	PrivateData *p = drvthis->private_data;
 
 	memset(p->framebuf, ' ', p->width * p->height);
+	p->ccmode = standard;
 }
 
 
