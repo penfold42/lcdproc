@@ -331,6 +331,7 @@ linuxDevLcd_flush(Driver *drvthis)
 				*sq = *sp;	/* Update backing store */
 				count++;
 			}
+			fflush(p->fd);
 		}
 	}
 	debug(RPT_DEBUG, "linux_devlcd: flushed %d chars", count);
@@ -371,6 +372,7 @@ linuxDevLcd_string (Driver *drvthis, int x, int y, const char string[])
 {
 	PrivateData *p = drvthis->private_data;
 	int i;
+	char c;
 
 	x--; y--; // Convert 1-based coords to 0-based...
 
@@ -378,8 +380,12 @@ linuxDevLcd_string (Driver *drvthis, int x, int y, const char string[])
                 return;
 
 	for (i = 0; (string[i] != '\0') && (x < p->width); i++, x++) {
+		c = string[i];
+		if (c == '\e')	/* replace escapes with space */
+			c = ' ';
+
 		if (x >= 0)	// no write left of left border
-			p->framebuf[(y * p->width) + x] = string[i];
+			p->framebuf[(y * p->width) + x] = c;
 	}
 }
 
@@ -398,6 +404,9 @@ linuxDevLcd_chr (Driver *drvthis, int x, int y, char c)
 	PrivateData *p = drvthis->private_data;
 
 	y--; x--;
+
+	if (c == '\e')	/* replace escapes with space */
+		c = ' ';
 
 	if ((x >= 0) && (y >= 0) && (x < p->width) && (y < p->height))
 		p->framebuf[(y * p->width) + x] = c;
