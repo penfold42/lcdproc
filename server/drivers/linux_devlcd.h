@@ -33,6 +33,43 @@ typedef struct cgram_cache {
 } CGram;
 
 
+/** private data for the \c text driver */
+typedef struct linuxDevLcd_private_data {
+	int width;		/**< display width in characters */
+	int height;		/**< display height in characters */
+	int cellwidth, cellheight;      /**< size a one cell (pixels) */
+	CGram cc[NUM_CCs];      /**< the custom character cache */
+	CGmode ccmode;          /**< character mode of the current screen */
+
+	/**
+	 * lastline controls the use of the last line, if pixel addressable
+	 * (true, default) or underline effect (false). To avoid the
+	 * underline effect, last line is always zeroed for whatever
+	 * redefined character.
+	 */
+	char lastline;
+
+	unsigned char *framebuf;		/**< fram buffer */
+	unsigned char *backingstore;    /**< buffer for incremental updates */
+
+	FILE* fd;		/**< handle to the device */
+
+        /** \name Forced screen updates
+         *@{*/
+        time_t nextrefresh;     /**< Time when the next refresh is due. */
+        int refreshdisplay;     /**< Seconds after which a complete display update is forced. */
+        /**@}*/
+
+        /** \name Keepalive
+         *@{*/
+        time_t nextkeepalive;   /**< Time the next keep-alive is due. */
+        int keepalivedisplay;   /**< Refresh upper left char every \c keepalivedisplay seconds. */
+        /**@}*/
+
+	int backlight_state;	/**< Cache backlight state */
+} PrivateData;
+
+
 #define DEFAULT_DEVICE	"/dev/lcd"
 #define TEXTDRV_DEFAULT_SIZE "20x4"
 

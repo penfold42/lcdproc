@@ -29,32 +29,12 @@
 #include <string.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <time.h>
 
 #include "lcd_lib.h"
 #include "linux_devlcd.h"
 #include "shared/report.h"
 #include "adv_bignum.h"
-
-
-/** private data for the \c text driver */
-typedef struct linuxDevLcd_private_data {
-	int width;		/**< display width in characters */
-	int height;		/**< display height in characters */
-	int cellwidth, cellheight;      /**< size a one cell (pixels) */
-	CGram cc[NUM_CCs];      /**< the custom character cache */
-	CGmode ccmode;          /**< character mode of the current screen */
-
-	/**
-	 * lastline controls the use of the last line, if pixel addressable
-	 * (true, default) or underline effect (false). To avoid the
-	 * underline effect, last line is always zeroed for whatever
-	 * redefined character.
-	 */
-	char lastline;
-
-	char *framebuf;		/**< fram buffer */
-	FILE* fd;		/**< handle to the device */
-} PrivateData;
 
 
 /* Vars for the server core */
@@ -91,6 +71,9 @@ linuxDevLcd_init (Driver *drvthis)
 	p->cellwidth = 5;
 	p->ccmode = standard;
 
+	/* init to invalid state */
+	p->backlight_state = -1;
+
 	/* which device should be used */
 	strncpy(device, drvthis->config_get_string(drvthis->name, "Device", 0, DEFAULT_DEVICE),
 		sizeof(device));
@@ -98,6 +81,11 @@ linuxDevLcd_init (Driver *drvthis)
 
 	report(RPT_INFO, "%s: using Device %s",
 	       drvthis->name, device);
+
+	p->nextrefresh          = 0;
+	p->refreshdisplay       = drvthis->config_get_int(drvthis->name, "refreshdisplay", 0, 0);
+	p->nextkeepalive        = 0;
+	p->keepalivedisplay     = drvthis->config_get_int(drvthis->name, "keepalivedisplay", 0, 0);
 
 	// Set display sizes
 	if ((drvthis->request_display_width() > 0)
@@ -127,6 +115,13 @@ linuxDevLcd_init (Driver *drvthis)
 	}
 	memset(p->framebuf, ' ', p->width * p->height);
 
+	/* Allocate and clear the buffer for incremental updates */
+	p->backingstore = (unsigned char *) calloc(p->width * p->height, sizeof(char));
+	if (p->backingstore == NULL) {
+		report(RPT_ERR, "%s: unable to allocate framebuffer backing store", drvthis->name);
+		return -1;
+	}
+
 	/* open the device... */
 	p->fd = fopen(device, "w" );
 
@@ -141,6 +136,8 @@ linuxDevLcd_init (Driver *drvthis)
 	fprintf(p->fd, "\e[LI"); // Reinitialise display
 	fprintf(p->fd, "\e[Lc"); // Cursor off
 	fprintf(p->fd, "\e[Lb"); // Blink off
+	fprintf(p->fd, "\e[2J"); // Clear Display
+	fprintf(p->fd, "\e[H");  // Move cursor home
 	fprintf(p->fd, "\e[LD"); // Display on
 
 	report(RPT_DEBUG, "%s: init() done", drvthis->name);
@@ -165,6 +162,9 @@ linuxDevLcd_close (Driver *drvthis)
 	if (p != NULL) {
 		if (p->framebuf != NULL)
 			free(p->framebuf);
+
+		if (p->backingstore)
+			free(p->backingstore);
 
 		free(p);
 	}
@@ -220,11 +220,25 @@ linuxDevLcd_cellwidth(Driver *drvthis)
  * \return  Number of pixel lines a character cell is high.
  */
 MODULE_EXPORT int
-HD44780_cellheight(Driver *drvthis)
+linuxDevLcd_cellheight(Driver *drvthis)
 {
 	PrivateData *p = (PrivateData *) drvthis->private_data;
 
 	return p->cellheight;
+}
+
+
+/**
+ * Set position (not part of API).
+ * \param drvthis  Pointer to driver structure.
+ * \param x        X-coordinate to go to.
+ * \param y        Y-coordinate to go to.
+ */
+void
+linuxDevLcd_position(Driver *drvthis, int x, int y)
+{
+	PrivateData *p = drvthis->private_data;
+	fprintf(p->fd, "\e[Lx%dy%d;", x, y);
 }
 
 
@@ -243,22 +257,104 @@ linuxDevLcd_clear (Driver *drvthis)
 
 
 /**
- * Flush data on screen to the display.
+ * Flush data on screen to the LCD.
  * \param drvthis  Pointer to driver structure.
  */
 MODULE_EXPORT void
-linuxDevLcd_flush (Driver *drvthis)
+linuxDevLcd_flush(Driver *drvthis)
 {
-	PrivateData *p = drvthis->private_data;
+	PrivateData *p = (PrivateData *) drvthis->private_data;
+	int x, y;
 	int i;
+	int count;
+	char refreshNow = 0;
+	char keepaliveNow = 0;
+	static char doneFirstRefresh = 0;
+	time_t now = time(NULL);
 
-	fprintf(p->fd, "\e[H"); // cursor home
-	for (i = 0; i < p->height; i++) {
-		fwrite( p->framebuf + (i * p->width), p->width, 1, p->fd);
-		fputc ('\n', p->fd);
+	/* force full refresh of display 1st time round */
+	if (!doneFirstRefresh) {
+		doneFirstRefresh = 1;
+		refreshNow = 1;
 	}
 
-        fflush(p->fd);
+	/* force full refresh of display */
+	if ((p->refreshdisplay > 0) && (now > p->nextrefresh)) {
+		refreshNow = 1;
+		p->nextrefresh = now + p->refreshdisplay;
+	}
+	/* keepalive refresh of display */
+	if ((p->keepalivedisplay > 0) && (now > p->nextkeepalive)) {
+		keepaliveNow = 1;
+		p->nextkeepalive = now + p->keepalivedisplay;
+	}
+
+	/*
+	 * LCD update algorithm: For each line skip over leading and trailing
+	 * identical portions of the line. Then send everything in between.
+	 * This will also update unchanged parts in the middle but is still
+	 * faster than the old algorithm, especially with devices using the
+	 * transmit buffer.
+	 */
+	count = 0;
+	for (y = 0; y < p->height; y++) {
+		int drawing;
+
+		/* set pointers to start of the line */
+		unsigned char *sp = p->framebuf + (y * p->width);
+		unsigned char *sq = p->backingstore + (y * p->width);
+
+		/* set pointers to end of the line */
+		unsigned char *ep = sp + (p->width - 1);
+		unsigned char *eq = sq + (p->width - 1);
+
+		/* On forced refresh update everything */
+		if (refreshNow || keepaliveNow) {
+			x = 0;
+		}
+		else {
+			/* find begin and end of differences */
+			for (x = 0; (sp <= ep) && (*sp == *sq); sp++, sq++, x++)
+			  ;
+			for (; (ep >= sp) && (*ep == *eq); ep--, eq--)
+			  ;
+		}
+
+		/* there are differences, ... */
+		if (sp <= ep) {
+			for (drawing = 0; sp <= ep; x++, sp++, sq++) {
+				if (!drawing) {
+					drawing = 1;
+					linuxDevLcd_position(drvthis,x,y);
+				}
+				fputc (*sp, p->fd);
+				*sq = *sp;	/* Update backing store */
+				count++;
+			}
+		}
+	}
+	debug(RPT_DEBUG, "linux_devlcd: flushed %d chars", count);
+
+	/* Check which definable chars we need to update */
+	count = 0;
+	for (i = 0; i < NUM_CCs; i++) {
+		if (!p->cc[i].clean) {
+			int row;
+
+			/* Tell the HD44780 we will redefine char number i */
+			fprintf(p->fd, "\e[LG%0d", i);
+
+			/* Send the subsequent rows */
+			for (row = 0; row < p->cellheight; row++) {
+				fprintf(p->fd, "%02x", p->cc[i].cache[row]);
+			}
+			fprintf(p->fd, ";");	/* end of define char */
+			fflush(p->fd);
+			p->cc[i].clean = 1;	/* mark as clean */
+			count++;
+		}
+	}
+	debug(RPT_DEBUG, "%s: flushed %d custom chars", drvthis->name, count);
 }
 
 
@@ -322,7 +418,11 @@ linuxDevLcd_backlight (Driver *drvthis, int on)
 // linux /dev/lcd driver escape codes
 //  \E[L+ Back light on
 //  \E[L- Back light off
-	fprintf(p->fd, "\e[L%c", (on) ? '+' : '-');
+	if (p->backlight_state != on) {
+		fprintf(p->fd, "\e[L%c", (on) ? '+' : '-');
+		p->backlight_state = on;
+	}
+
 	fflush(p->fd);
 }
 
@@ -484,12 +584,6 @@ linuxDevLcd_set_char(Driver *drvthis, int n, unsigned char *dat)
 		return;
 	if (!dat)
 		return;
-
-	fprintf(p->fd, "\e[LG%0d", n);
-	for (row = 0; row < p->cellheight; row++) {
-		fprintf(p->fd, "%02x", dat[row] & mask);
-	}
-	fprintf(p->fd, ";");
 
 	for (row = 0; row < p->cellheight; row++) {
 		int letter = 0;
