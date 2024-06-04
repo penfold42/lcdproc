@@ -108,18 +108,18 @@ linuxDevLcd_init (Driver *drvthis)
 	}
 
 	// Allocate the framebuffer
-	p->framebuf = malloc(p->width * p->height);
+	p->framebuf = (unsigned char *) calloc(p->width * p->height, sizeof(char));
 	if (p->framebuf == NULL) {
-		report(RPT_ERR, "%s: unable to create framebuffer", drvthis->name);
-		return -1;
+		report(RPT_ERR, "%s: unable to allocate framebuffer", drvthis->name);
+		goto err_out;
 	}
 	memset(p->framebuf, ' ', p->width * p->height);
 
 	/* Allocate and clear the buffer for incremental updates */
 	p->backingstore = (unsigned char *) calloc(p->width * p->height, sizeof(char));
 	if (p->backingstore == NULL) {
-		report(RPT_ERR, "%s: unable to allocate framebuffer backing store", drvthis->name);
-		return -1;
+		report(RPT_ERR, "%s: unable to allocate fb backing store", drvthis->name);
+		goto err_out;
 	}
 
 	/* open the device... */
@@ -163,7 +163,7 @@ linuxDevLcd_close (Driver *drvthis)
 		if (p->framebuf != NULL)
 			free(p->framebuf);
 
-		if (p->backingstore)
+		if (p->backingstore != NULL)
 			free(p->backingstore);
 
 		free(p);
